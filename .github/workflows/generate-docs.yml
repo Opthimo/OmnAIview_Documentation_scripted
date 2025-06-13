@@ -1,0 +1,119 @@
+name: Generate Project Documentation
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # Manueller Trigger über GitHub UI
+
+jobs:
+  generate-documentation:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout documentation repo
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Checkout Angular source code
+      uses: actions/checkout@v4
+      with:
+        repository: Opthimo/OmnAIView
+        path: ./source-code
+        ref: master
+        
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install dependencies
+      run: |
+        # Install madge for dependency analysis
+        npm install -g madge
+        
+        # Install LaTeX
+        sudo apt-get update
+        sudo apt-get install -y texlive-latex-extra texlive-fonts-recommended texlive-fonts-extra
+        
+        # Install ImageMagick for SVG to PNG conversion
+        sudo apt-get install -y imagemagick
+        
+        # Create documentation directory if it doesn't exist
+        mkdir -p documentation
+        mkdir -p PDF
+        
+    - name: Generate dependency graph with madge
+      run: |
+        cd source-code/angular-frontend
+        madge --image ../../documentation/components.svg src/app/graph/graph.component.ts src/app/omnai-datasource/
+        
+    - name: Convert SVG to PNG
+      run: |
+        # Convert SVG to PNG with good quality
+        convert documentation/components.svg -density 300 -quality 100 documentation/components.png
+        
+    - name: Update LaTeX document
+      run: |
+        # Get current date for filename
+        CURRENT_DATE=$(date +"%Y-%m")
+        echo "Current date: $CURRENT_DATE"
+        
+        # Update the LaTeX file with the new image
+        sed -i 's|% COMPONENT_IMAGE_PLACEHOLDER|\\includegraphics[width=\\textwidth]{../documentation/components.png}|g' LaTeX/main.tex
+        
+    - name: Generate PDF
+      run: |
+        cd LaTeX
+        
+        # Get current date for filename
+        CURRENT_DATE=$(date +"%Y-%m")
+        BASE_NAME="Projektdokumentation-${CURRENT_DATE}"
+        
+        # Check for existing files and create unique filename
+        COUNTER=1
+        PDF_NAME="${BASE_NAME}.pdf"
+        
+        while [ -f "../PDF/${PDF_NAME}" ]; do
+          PDF_NAME="${BASE_NAME}_${COUNTER}.pdf"
+          COUNTER=$((COUNTER + 1))
+        done
+        
+        echo "Generating PDF: ${PDF_NAME}"
+        
+        # Generate PDF (run twice for proper references)
+        pdflatex -interaction=nonstopmode main.tex
+        pdflatex -interaction=nonstopmode main.tex
+        
+        # Move PDF to target directory
+        mv main.pdf "../PDF/${PDF_NAME}"
+        
+        # Save PDF name for later use
+        echo "PDF_NAME=${PDF_NAME}" >> $GITHUB_ENV
+        
+    - name: Commit and push changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action Documentation Generator"
+        
+        git add documentation/ PDF/ LaTeX/
+        git commit -m "Auto-generate documentation: ${PDF_NAME} [skip ci]" || echo "No changes to commit"
+        git push
+        
+    - name: Upload PDF as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: documentation-pdf
+        path: PDF/*.pdf
+        
+    - name: Comment on PR (if triggered by PR)
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: '📚 Documentation has been automatically generated! PDF: `${{ env.PDF_NAME }}`'
+          })
